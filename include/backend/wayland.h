@@ -151,6 +151,7 @@ struct wlr_wl_pointer {
 
 struct wlr_wl_touch_points {
 	int32_t ids[64];
+	struct wlr_wl_output *outputs[64];
 	size_t len;
 };
 
