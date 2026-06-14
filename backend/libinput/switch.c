@@ -40,6 +40,16 @@ void handle_switch_toggle(struct libinput_event *event,
 	case LIBINPUT_SWITCH_TABLET_MODE:
 		wlr_event.switch_type = WLR_SWITCH_TYPE_TABLET_MODE;
 		break;
+#ifdef LIBINPUT_SWITCH_KEYPAD_SLIDE
+	/* Newer libinput versions expose keypad/touchpad slide switches */
+	case LIBINPUT_SWITCH_KEYPAD_SLIDE:
+	case LIBINPUT_SWITCH_TOUCHPAD_SLIDE:
+		/* No corresponding wlr_switch_type: ignore */
+		break;
+#endif
+	default:
+		wlr_log(WLR_DEBUG, "Unknown libinput switch type: ignoring");
+		break;
 	}
 	switch (libinput_event_switch_get_switch_state(sevent)) {
 	case LIBINPUT_SWITCH_STATE_OFF:
