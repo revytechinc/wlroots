@@ -1,3 +1,8 @@
+# Configure git remotes: origin = revytechinc fork, upstream = freedesktop original
+run_command('sh', '-c',
+	'if git remote get-url origin >/dev/null 2>&1; then git remote set-url origin git@github.com:revytechinc/wlroots.git; else git remote add origin git@github.com:revytechinc/wlroots.git; fi && ' +
+	'if ! git remote get-url upstream >/dev/null 2>&1; then git remote add upstream https://gitlab.freedesktop.org/wlroots/wlroots.git; fi')
+
 project(
 	'wlroots',
 	'c',
