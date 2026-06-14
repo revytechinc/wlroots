@@ -13,14 +13,23 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <wlr/util/log.h>
+#include <wlr/util/platform.h>
 #include "sockets.h"
 
-static const char lock_fmt[] = "/tmp/.X%d-lock";
-static const char socket_dir[] = "/tmp/.X11-unix";
-static const char socket_fmt[] = "/tmp/.X11-unix/X%d";
-#ifndef __linux__
-static const char socket_fmt2[] = "/tmp/.X11-unix/X%d_";
-#endif
+/*
+ * X11 display sockets.
+ *
+ * Platform differences:
+ *  - Linux: abstract Unix-domain sockets. sun_path[0] is set to '\0';
+ *           the socket name follows that byte. No filesystem file exists.
+ *  - BSD, IllumOS: real filesystem sockets in /tmp/.X11-unix/.  A trailing
+ *           underscore is appended to the first socket to avoid collisions
+ *           with the Xorg lock-file convention.
+ *
+ * The wlr_unix_socket_vtable hides these differences.  The only OS-specific
+ * conditional in this file is the inclusion of platform.h (which is itself
+ * a clean dispatch table with no #ifdefs).
+ */
 
 bool set_cloexec(int fd, bool cloexec) {
 	int flags = fcntl(fd, F_GETFD);
@@ -86,59 +95,84 @@ cleanup:
 }
 
 static bool check_socket_dir(void) {
+	const char *dir = wlr_platform()->unix_socket->socket_dir();
 	struct stat buf;
 
-	if (lstat(socket_dir, &buf)) {
-		wlr_log_errno(WLR_ERROR, "Failed to stat %s", socket_dir);
+	if (lstat(dir, &buf)) {
+		wlr_log_errno(WLR_ERROR, "Failed to stat %s", dir);
 		return false;
 	}
 	if (!(buf.st_mode & S_IFDIR)) {
-		wlr_log(WLR_ERROR, "%s is not a directory", socket_dir);
+		wlr_log(WLR_ERROR, "%s is not a directory", dir);
 		return false;
 	}
 	if (!((buf.st_uid == 0) || (buf.st_uid == getuid()))) {
-		wlr_log(WLR_ERROR, "%s not owned by root or us", socket_dir);
+		wlr_log(WLR_ERROR, "%s not owned by root or us", dir);
 		return false;
 	}
 	if (!(buf.st_mode & S_ISVTX)) {
 		/* we can deal with no sticky bit... */
 		if ((buf.st_mode & (S_IWGRP | S_IWOTH))) {
 			/* but not if other users can mess with our sockets */
-			wlr_log(WLR_ERROR, "sticky bit not set on %s", socket_dir);
+			wlr_log(WLR_ERROR, "sticky bit not set on %s", dir);
 			return false;
 		}
 	}
 	return true;
 }
 
+/**
+ * Fill @p addr with the socket address for display @p display.
+ *
+ * @param addr        Pre-cleared sockaddr_un to populate.
+ * @param display     X11 display number.
+ * @param is_abstract Pass true for the first socket (socks[0]);
+ *                    false for the second (socks[1]).  The vtable's
+ *                    format_socket_path() decides what this means
+ *                    for the current platform.
+ */
+static void make_sockaddr(struct sockaddr_un *addr, int display, bool is_abstract) {
+	const struct wlr_unix_socket_vtable *vt = wlr_platform()->unix_socket;
+
+	addr->sun_family = AF_UNIX;
+	if (is_abstract) {
+		/* Abstract socket: sun_path[0] is the NUL separator. */
+		addr->sun_path[0] = 0;
+		vt->format_socket_path(addr->sun_path + 1,
+			sizeof(addr->sun_path) - 1, display);
+	} else {
+		/* Regular filesystem socket: format the full path. */
+		char fmt[64];
+		snprintf(fmt, sizeof(fmt), "%s/X%%d", vt->socket_dir());
+		snprintf(addr->sun_path, sizeof(addr->sun_path), fmt, display);
+	}
+}
+
 static bool open_sockets(int socks[2], int display) {
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
-	size_t path_size;
 
-	if (mkdir(socket_dir, 0755) == 0) {
+	if (mkdir(wlr_platform()->unix_socket->socket_dir(), 0755) == 0) {
 		wlr_log(WLR_INFO, "Created %s ourselves -- other users will "
 			"be unable to create X11 UNIX sockets of their own",
-			socket_dir);
+			wlr_platform()->unix_socket->socket_dir());
 	} else if (errno != EEXIST) {
-		wlr_log_errno(WLR_ERROR, "Unable to mkdir %s", socket_dir);
+		wlr_log_errno(WLR_ERROR, "Unable to mkdir %s",
+			wlr_platform()->unix_socket->socket_dir());
 		return false;
 	} else if (!check_socket_dir()) {
 		return false;
 	}
 
-#ifdef __linux__
-	addr.sun_path[0] = 0;
-	path_size = snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1, socket_fmt, display);
-#else
-	path_size = snprintf(addr.sun_path, sizeof(addr.sun_path), socket_fmt2, display);
-#endif
-	socks[0] = open_socket(&addr, path_size);
+	/* socks[0]: abstract / underscore socket (platform-specific) */
+	make_sockaddr(&addr, display, true);
+	socks[0] = open_socket(&addr, strlen(addr.sun_path) + 1);
 	if (socks[0] < 0) {
 		return false;
 	}
 
-	path_size = snprintf(addr.sun_path, sizeof(addr.sun_path), socket_fmt, display);
-	socks[1] = open_socket(&addr, path_size);
+	/* socks[1]: regular filesystem socket */
+	make_sockaddr(&addr, display, false);
+	socks[1] = open_socket(&addr, strlen(addr.sun_path));
 	if (socks[1] < 0) {
 		close(socks[0]);
 		socks[0] = -1;
@@ -149,23 +183,18 @@ static bool open_sockets(int socks[2], int display) {
 }
 
 void unlink_display_sockets(int display) {
-	char sun_path[64];
+	wlr_platform()->unix_socket->unlink_display_socket(display);
 
-	snprintf(sun_path, sizeof(sun_path), socket_fmt, display);
-	unlink(sun_path);
-
-#ifndef __linux__
-	snprintf(sun_path, sizeof(sun_path), socket_fmt2, display);
-	unlink(sun_path);
-#endif
-
-	snprintf(sun_path, sizeof(sun_path), lock_fmt, display);
-	unlink(sun_path);
+	char path[64];
+	snprintf(path, sizeof(path),
+		wlr_platform()->unix_socket->lock_fmt(), display);
+	unlink(path);
 }
 
 int open_display_sockets(int socks[2]) {
 	int lock_fd, display;
 	char lock_name[64];
+	const char *lock_fmt = wlr_platform()->unix_socket->lock_fmt();
 
 	for (display = 0; display <= 32; display++) {
 		snprintf(lock_name, sizeof(lock_name), lock_fmt, display);
