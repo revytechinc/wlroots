@@ -146,6 +146,14 @@ subdir('include')
 
 wlr_inc = include_directories('include')
 
+# FreeBSD: add compat headers for Linux kernel compatibility
+if host_machine.system() == 'freebsd'
+	wlr_inc = [wlr_inc, include_directories('compat')]
+	add_project_arguments([
+		'-I@0@/compat'.format(meson.current_source_dir()),
+	], language: 'c')
+endif
+
 symbols_file = 'wlroots.syms'
 symbols_flag = '-Wl,--version-script,@0@/@1@'.format(meson.current_source_dir(), symbols_file)
 lib_wlr = library(
